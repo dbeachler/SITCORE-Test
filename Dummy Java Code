@@ -1,0 +1,286 @@
+Index: /path/to/file.ext' (svn)
+
+package historicalTwitterData; //Not sure what to do with this package statement. Please advise.
+
+=======================
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.math.BigInteger;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.util.ArrayList;
+import java.util.List;
+
+import javax.net.ssl.HttpsURLConnection;
+
+import org.apache.commons.codec.binary.Base64;
+import org.json.simple.JSONArray;
+import org.json.simple.JSONObject;
+import org.json.simple.JSONValue;
+import org.openqa.selenium.By;
+import org.openqa.selenium.JavascriptExecutor;
+import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.WebElement;
+import org.openqa.selenium.phantomjs.PhantomJSDriver;
+import org.openqa.selenium.phantomjs.PhantomJSDriverService;
+import org.openqa.selenium.remote.DesiredCapabilities;
+
+
+/*
+ * This class uses Selenium, JSON-Simple, and Apache Commons-codec libraries.
+ * In addition, PhantomJS should be installed, as it is used as well.
+ *
+ * This class is used to retrieve tweet information. Use SetDateRange/SetLocation
+ * to narrow down the search. There are no checks to make sure that the date
+ * and location are correct (i.e. a non-existent city won't do anything) so
+ * please make sure of your inputs!
+ */
+public class TweetRetriever {
+
+	private String location;
+	private String untilDate;
+	private String sinceDate;
+	//Replace PHANTOM_PATH value with path to PhantomJS Executable.
+	private final String PHANTOM_PATH = "C:\\Users\\mchen14\\Desktop\\Workstation\\phantomjs-2.0.0-windows\\bin\\phantomjs.exe";
+
+	public TweetRetriever(){
+		location = "";
+		untilDate = "";
+		sinceDate = "";
+	}
+
+	//Location should include City and then State. Format; City, State.
+	//State can be in 2 letter form. Alternatively, can be State, Country.
+	//Or city, country in some cases. Haven't tested with other countries.
+	//The %3A and %20 and %2C are placeholders for spaces in the URL. They are
+	//inserted appropriately in these methods.
+	public void setLocation(String loc){
+		String[] locParts = loc.split("\\s");
+		location = "near%3A" + "\"";
+		for(int i = 0; i < locParts.length; i++){
+			if(locParts[i].contains(",")){
+				locParts[i] = locParts[i].substring(0, locParts[i].length() - 1);
+				location += locParts[i] + "%2C%20";
+			} else {
+				if(i == locParts.length - 1) //if it's the last token of the location
+					location += locParts[i];
+				else
+					location += locParts[i] + "%20";
+			}
+		}
+		location += "\"" + "%20within%3A15mi";
+	}
+	//Should be dates in the form of string, written like 2014-06-02 (YYYY-MM-DD)
+	//To only use one (since or until), put empty quotes ("") in the other param
+	public void setDateRange(String since, String until){
+		sinceDate = (since.length() == 0)?"":"%20since%3A" + since;
+		untilDate = (until.length() == 0)?"":"%20until%3A" + until;
+	}
+	//Self-explanatory
+	private String removeSpaces(String q){
+		StringBuilder newStr = new StringBuilder();
+		String[] split = q.split("\\s");
+		for(int i = 0; i < split.length; i++){
+			newStr.append(split[i]);
+			newStr.append("%20");
+		}
+		return newStr.toString();
+	}
+	/*
+	 * This method scrapes tweets from the Twitter search page and forms JSON
+	 * objects that aren't as complete as they would be returned from the API.
+	 *
+	 * This method uses PhantomJSDriver, which should be installed. The path
+	 * to the executable should be placed into the PATH constant.
+	 */
+	public JSONObject getTweetsFromSelenium(String query, int numTweetsRequested){
+		query = removeSpaces(query);
+		//This is a Selenium/PhantomJS thing. It seems to work by
+		//directing the phantomJS driver variable to the executable.
+		DesiredCapabilities dcaps =  new DesiredCapabilities();
+        dcaps.setJavascriptEnabled(true);
+        dcaps.setCapability("takesScreenshot", false);
+        dcaps.setCapability(PhantomJSDriverService.PHANTOMJS_EXECUTABLE_PATH_PROPERTY,PHANTOM_PATH);
+
+        //NOTE that phantomJSDriver has a small bug; driver.close() does not
+        //completely kill all phantom processes; You'll find some sticking around.
+        //Manually kill them whenever they get too troublesome. I don't know
+        //how to do it.
+		WebDriver driver = new PhantomJSDriver(dcaps);
+		String URL = "https://twitter.com/search?q="+query+location+untilDate+sinceDate+"&src=typd";
+		driver.get(URL);
+
+		System.out.println("Page title is: " + driver.getTitle());
+
+        JavascriptExecutor jse = (JavascriptExecutor)driver;
+        int numberOfTweets = 0;
+        do{
+        	try{
+        		//arbitrary number used to scroll down the page. Scrolling down
+        		//is used to load more tweets, because the search page is lazy-loading.
+        		jse.executeScript("scroll(0,30000);");
+    	   		Thread.sleep(1500);
+    	   		int newNumTweets = driver.findElements(By.className("tweet")).size();
+    	   		if(numberOfTweets != newNumTweets){
+    	   			numberOfTweets = newNumTweets;
+    	   		} else //if old number = new number, then break while loop.
+    	   			numberOfTweets += numTweetsRequested; //no more tweets to receive.
+        	} catch(Exception e){
+        		e.printStackTrace();
+        	}
+        } while(numberOfTweets <= numTweetsRequested);
+
+        List<WebElement> tweets = driver.findElements(By.className("tweet"));
+		System.out.println("__________"+tweets.size()+" tweets________________");
+
+		JSONObject tweetJSON = new JSONObject();
+		JSONArray t = new JSONArray();
+		for(WebElement e : tweets){
+			JSONObject a = convertToJSON(e);
+			t.add(a);
+		}
+        tweetJSON.put("statuses:", t);
+		driver.close();
+		driver.quit();
+		return tweetJSON;
+	}
+	//we want text, username, time stamp, retweet info, location most important
+	//Creates a JSON object out of the extracted data from HTML.
+	//This method uses JSONsimple. It extracts several specific elements, because
+	//there's lots of useless HTMl data, and I don't know how else to do it.
+	private static JSONObject convertToJSON(WebElement e){
+		JSONObject j = new JSONObject();
+		String text = (e.findElements(By.className("TweetTextSize")).size() == 0)
+				?"":e.findElement(By.className("TweetTextSize")).getText();
+		String screenName = e.getAttribute("data-screen-name");
+		String userName = e.getAttribute("data-name");
+		String userID = e.getAttribute("data-user-id");
+		String time = (e.findElements(By.className("tweet-timestamp")).size() == 0)
+				? "": e.findElement(By.className("tweet-timestamp")).getAttribute("title");
+		String retweetCount = (e.findElements(By.className("ProfileTweet-actionCount")).size() == 0)
+				? "0":e.findElement(By.className("ProfileTweet-actionCount")).getAttribute("data-tweet-stat-count");
+		String loc = (e.findElements(By.className("Tweet-geo")).size() == 0)?
+				"Location not found":e.findElement(By.className("Tweet-geo")).getText();//Attribute("data-original-title");
+		String id_str = e.getAttribute("data-tweet-id");
+
+		j.put("text", text);
+		JSONObject user = new JSONObject();
+		user.put("name", userName);
+		user.put("screen_name", screenName);
+		user.put("id_str", userID);
+		j.put("user", user);
+		j.put("retweet_count", Integer.parseInt(retweetCount));
+		j.put("created_at", time);
+		j.put("coordinates", null);
+		j.put("id_str", id_str);
+		j.put("location", loc);
+		return j;
+	}
+	//Uses Twitter REST API to return tweets in JSON form.
+	public JSONObject getTweetsFromAPI(String url) throws Exception{
+		//The key/secret pair is required for OAuthorization, needed to
+		//request from the Twitter API. A key/secret pair is generated when you
+		//make a Twitter application on their site. Switch this key/secret pair
+		//for one of your own to use it.
+		String key = "INSERT_KEY";
+		String secret = "INSERT_SECRET";
+		String eKey = encodeKeys(key, secret);
+		String bearerToken = "";
+		try{
+			URL oAuth = new URL("https://api.twitter.com/oauth2/token");
+			bearerToken = requestAuth(oAuth, eKey);
+		} catch (Exception e){
+			e.printStackTrace();
+		}
+		return getTweets(bearerToken, url);
+
+	}
+	//Private helper method for getTweetsFromAPI
+	//Apache Commons-codec library is used to encode the key into Base64.
+	//However, any Base64 encoder will work.
+	private static String encodeKeys(String key, String secret){
+		try{
+			String encodedKey = URLEncoder.encode(key, "UTF-8");
+			String encodedSecret = URLEncoder.encode(secret,"UTF-8");
+			String fullKey = encodedKey + ":" + encodedSecret;
+			System.out.println(fullKey);
+			byte[] encodedBytes = Base64.encodeBase64(fullKey.getBytes());
+			System.out.println(encodedBytes);
+			return new String(encodedBytes);
+		}
+		catch (Exception e){
+			return new String();
+		}
+
+	}
+	//Private helper method for getTweetsFromAPI
+	private static String requestAuth(URL oAuth, String encodedKey){
+		try{
+			HttpsURLConnection con = (HttpsURLConnection) oAuth.openConnection();
+			String bearerToken = "";
+			con.setRequestMethod("POST");
+			con.setDoOutput(true);
+			con.setDoInput(true);
+			con.setRequestProperty("Host", "api.twitter.com");
+			con.setRequestProperty("User-Agent", "SURISearch");
+			con.setRequestProperty("Authorization", "Basic " + encodedKey);
+			con.setRequestProperty("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8");
+			con.setRequestProperty("Content-Length", "29");
+
+	        BufferedWriter wr = new BufferedWriter(new OutputStreamWriter(con.getOutputStream()));
+			wr.write("grant_type=client_credentials");
+			wr.flush();
+			wr.close();
+
+			System.out.println(con.getResponseMessage());
+
+			BufferedReader br = new BufferedReader(new InputStreamReader(con.getInputStream()));
+			String line = "";
+			StringBuilder str = new StringBuilder();
+			while((line = br.readLine()) != null){
+				str.append(line + System.getProperty("line.separator"));
+			}
+
+			JSONObject obj = (JSONObject) JSONValue.parse(str.toString());
+
+			if(obj != null){
+				String tokenType = (String) obj.get("token_type");
+				String token = (String) obj.get("access_token");
+				bearerToken = ((tokenType.equals("bearer")) && token != null)? token : "";
+			}
+
+			return bearerToken;
+		} catch (Exception e){
+			return "";
+		}
+	}
+	//Private helper method for getTweetsFromAPI
+	private static JSONObject getTweets(String bearerToken, String url) throws Exception{
+
+		URL searchTweets = new URL(url);
+		HttpsURLConnection con2 = (HttpsURLConnection) searchTweets.openConnection();
+
+		con2.setRequestMethod("GET");
+
+		con2.setRequestProperty("Host", "api.twitter.com");
+		con2.setRequestProperty("User-Agent", "SURISearch");
+		con2.setRequestProperty("Authorization", "Bearer " + bearerToken);
+
+		BufferedReader lol = new BufferedReader(new InputStreamReader(con2.getInputStream()));
+		StringBuilder sb = new StringBuilder();
+		String line = "";
+		while((line = lol.readLine()) != null){
+			sb.append(line);
+		}
+		JSONObject b = (JSONObject) JSONValue.parse(sb.toString());
+
+	//	System.out.print(b);
+		return b;
+	}
+}
